@@ -5,15 +5,16 @@
  * 
  *  Date        Author          Description
  *  ====        ======          ===========
- *  06-26-25    Craig           initial implementation
+ *  06-26-25    Craig           initial implementaton
  *
  */
 using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
-namespace LSReplica
+namespace LS
 {
     class Program
     {
@@ -24,42 +25,59 @@ namespace LSReplica
         static bool sortBySize = false;
         static bool sortByTime = false;
         static bool longFormat = false;
+        static bool exactSize = false;
 
         static void Main(string[] args)
         {
             Console.OutputEncoding = System.Text.Encoding.UTF8;
+            if (OperatingSystem.IsWindows()) EnableVirtualTerminal();
 
-            // Enable ANSI support in Windows Terminal / VS Code Terminal
-            if (OperatingSystem.IsWindows())
-                EnableVirtualTerminal();
-
+            /*
+             * Parse command line arguments and get the files to process.
+             */
             var targets = new List<string>();
-            ParseArgs(args, out targets);
+            ParseArgs(args, targets);
+            var finalTargets = ExpandWildcards(targets);
 
-            if (targets.Count == 0)
-                targets.Add(Directory.GetCurrentDirectory());
+            if (finalTargets.Count == 0)
+                finalTargets.Add(Directory.GetCurrentDirectory());
 
-            foreach (var target in targets)
+            /*
+             * process each target
+             */
+            foreach (var target in finalTargets)
             {
-                if (!Directory.Exists(target))
+                if (File.Exists(target))
                 {
-                    Console.Error.WriteLine($"ls: cannot access '{target}': No such directory");
+                    var entries = new List<string> { target };
+                    if (longFormat) PrintLongEntries(entries);
+                    else PrintEntries(entries);
                     continue;
                 }
 
-                if (targets.Count > 1)
+                if (!Directory.Exists(target))
+                {
+                    Console.Error.WriteLine($"ls: cannot access '{target}': No such file or directory");
+                    continue;
+                }
+
+                if (finalTargets.Count > 1)
                     Console.WriteLine($"\n{target}:");
 
-                ListEntries(target, recursive);
+                ListEntries(target);
             }
-        }
+        } /* Main() */
 
-        static void ParseArgs(string[] args, out List<string> targets)
+        /*
+         * ParseArgs
+         * 
+         * Parse command line arguments and collect targets.
+         */
+        static void ParseArgs(string[] args, List<string> targets)
         {
-            targets = new List<string>();
             foreach (var arg in args)
             {
-                if (arg.StartsWith("-"))
+                if (arg.StartsWith("-") && arg.Length > 1)
                 {
                     foreach (var ch in arg.Skip(1))
                     {
@@ -73,6 +91,7 @@ namespace LSReplica
                             case 't': sortByTime = true; break;
                             case '1': onePerLine = true; break;
                             case 'l': longFormat = true; break;
+                            case 'x': exactSize = true; break;
                             default:
                                 Console.Error.WriteLine($"ls: invalid option -- '{ch}'");
                                 Environment.Exit(1);
@@ -85,25 +104,63 @@ namespace LSReplica
                     targets.Add(arg);
                 }
             }
-        }
+        } /* ParseArgs */
 
+        /*
+         * ExpandWildcards
+         * 
+         * Expand wildcards in the input list to actual file paths.
+         * If a pattern contains '*' or '?', it will be expanded to match files in the current directory.
+         */
+        static List<string> ExpandWildcards(List<string> inputs)
+        {
+            var output = new List<string>();
+            foreach (var pattern in inputs)
+            {
+                if (pattern.Contains("*") || pattern.Contains("?"))
+                {
+                    string dir = Path.GetDirectoryName(pattern);
+                    if (string.IsNullOrEmpty(dir)) dir = Directory.GetCurrentDirectory();
+                    string mask = Path.GetFileName(pattern);
+                    var matches = Directory.GetFileSystemEntries(dir, mask, SearchOption.TopDirectoryOnly);
+                    output.AddRange(matches);
+                }
+                else
+                {
+                    output.Add(pattern);
+                }
+            }
+            return output;
+        } /* ExpandWildcards */
+
+        /*
+         * ShowHelp
+         * 
+         * Display the help message for the ls command.
+         */
         static void ShowHelp()
         {
             Console.WriteLine(@"
-Usage: ls [-?aRrst1l] [directories]
+Usage: ls [-?aRrst1lx] [files/directories/wildcards]
 Options:
   -?       : display this message
   -a       : show hidden files
-  -R       : recursive ls
+  -R       : recursive
   -r       : reverse sort
-  -s       : sort by size (largest first)
-  -t       : sort by modified time (most recent first)
-  -1       : one entry per line
-  -l       : long listing format (size, date, perms)
+  -s       : sort by size
+  -t       : sort by modified time
+  -1       : one item per line
+  -l       : long listing format
+  -x       : show exact byte sizes (default: human-readable with commas)
 ");
-        }
+        } /* ShowHelp */
 
-        static void ListEntries(string path, bool recurse)
+        /*
+         * ListEntries
+         * 
+         * List the entries in the specified directory, applying filters and formatting as needed.
+         */
+        static void ListEntries(string path)
         {
             try
             {
@@ -118,20 +175,18 @@ Options:
                     return true;
                 });
 
-                var sortedEntries = SortEntries(entries.ToList());
+                var sorted = SortEntries(entries.ToList());
 
-                if (longFormat)
-                    PrintLongEntries(sortedEntries);
-                else
-                    PrintEntries(sortedEntries);
+                if (longFormat) PrintLongEntries(sorted);
+                else PrintEntries(sorted);
 
-                if (recurse)
+                if (recursive)
                 {
-                    var dirs = sortedEntries.Where(Directory.Exists);
+                    var dirs = sorted.Where(Directory.Exists);
                     foreach (var dir in dirs)
                     {
                         Console.WriteLine($"\n{dir}:");
-                        ListEntries(dir, true);
+                        ListEntries(dir);
                     }
                 }
             }
@@ -139,8 +194,13 @@ Options:
             {
                 Console.Error.WriteLine($"ls: cannot open directory '{path}': Permission denied");
             }
-        }
+        } /* ListEntries */
 
+        /*
+         * SortEntries
+         * 
+         * Sort the entries based on the specified criteria: size, time, or name.
+         */
         static List<string> SortEntries(List<string> entries)
         {
             IOrderedEnumerable<string> ordered;
@@ -149,10 +209,7 @@ Options:
             {
                 ordered = entries.OrderByDescending(p =>
                 {
-                    try
-                    {
-                        return Directory.Exists(p) ? 0 : new FileInfo(p).Length;
-                    }
+                    try { return Directory.Exists(p) ? 0 : new FileInfo(p).Length; }
                     catch { return -1; }
                 });
             }
@@ -160,10 +217,7 @@ Options:
             {
                 ordered = entries.OrderByDescending(p =>
                 {
-                    try
-                    {
-                        return File.GetLastWriteTime(p);
-                    }
+                    try { return File.GetLastWriteTime(p); }
                     catch { return DateTime.MinValue; }
                 });
             }
@@ -173,24 +227,24 @@ Options:
             }
 
             var list = ordered.ToList();
-            if (reverseSort)
-                list.Reverse();
-
+            if (reverseSort) list.Reverse();
             return list;
-        }
+        } /* SortEntries */
 
+        /*
+         * PrintEntries
+         * 
+         * print the entries in a formatted manner.
+         */
         static void PrintEntries(List<string> entries)
         {
             if (entries.Count == 0) return;
 
             var names = entries.Select(Path.GetFileName).ToList();
-
             if (onePerLine)
             {
                 foreach (var path in entries)
-                {
                     WriteName(path);
-                }
             }
             else
             {
@@ -204,24 +258,27 @@ Options:
                     {
                         int i = c * rows + r;
                         if (i < names.Count)
-                        {
                             WriteName(entries[i], maxLen);
-                        }
                     }
                     Console.WriteLine();
                 }
             }
-        }
+        } /* PrintEntries */
 
+        /*
+         * PrintLongEntries
+         * 
+         * Print the entries in long format, showing permissions, size, modification time, and name.
+         */
         static void PrintLongEntries(List<string> entries)
         {
-            long totalSize = 0;
-            int maxSizeLen = entries
-                .Select(e => Directory.Exists(e) ? 0L : new FileInfo(e).Length)
-                .Max()
-                .ToString().Length;
+            if (entries.Count == 0) return;
 
-            Console.WriteLine($"total {entries.Count}");
+            int sizeWidth = exactSize
+                ? entries.Select(e => Directory.Exists(e) ? 0L : new FileInfo(e).Length).Max().ToString().Length
+                : entries.Select(e => FormatSizeWithUnit(Directory.Exists(e) ? 0L : new FileInfo(e).Length).Length).Max();
+
+            sizeWidth = Math.Max(sizeWidth, 9); // reasonable min width
 
             foreach (var entry in entries)
             {
@@ -233,56 +290,124 @@ Options:
                 string h = attrs.HasFlag(FileAttributes.Hidden) ? "h" : "-";
                 string s = attrs.HasFlag(FileAttributes.System) ? "s" : "-";
                 string r = attrs.HasFlag(FileAttributes.ReadOnly) ? "r" : "w";
-                string x = (entry.EndsWith(".exe") || entry.EndsWith(".bat") || entry.EndsWith(".cmd")) ? "x" : "-";
+                string x = (entry.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                            entry.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
+                            entry.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)) ? "x" : "-";
 
                 string perms = $"{type}{h}{s}-{r}{x}-";
-
                 long size = isDir ? 0 : fi.Length;
-                totalSize += size;
-                string sizeStr = size.ToString().PadLeft(maxSizeLen);
 
-                string mod = File.GetLastWriteTime(entry).ToString("MMM dd yyyy  HH:mm");
-                WriteColored($"{perms} {sizeStr}  {mod}  {Path.GetFileName(entry)}", entry);
+                string sizeStr = exactSize
+                    ? size.ToString().PadLeft(sizeWidth)
+                    : FormatSizeWithUnit(size).PadLeft(sizeWidth);
+
+                string mod = fi.LastWriteTime.ToString("MMM dd yyyy  HH:mm");
+                string name = Path.GetFileName(entry);
+
+
+                string sizeColor = GetSizeColorGranular(size);
+                Console.Write($"{perms}  {sizeColor}{sizeStr}\x1b[0m  {mod}  ");
+                //Console.Write($"{perms}  {sizeStr}  {mod}  ");
+                WriteColored(name, entry);
                 Console.WriteLine();
             }
-        }
+        } /* PrintLongEntries */
 
+        /*
+         * FormatSizeWithUnit
+         * 
+         * Format the size in bytes into a human-readable string with appropriate units.
+         */
+        static string FormatSizeWithUnit(long bytes)
+        {
+            string[] units = { "B", "KB", "MB", "GB", "TB" };
+            double size = bytes;
+            int unit = 0;
+            while (size >= 1024 && unit < units.Length - 1)
+            {
+                size /= 1024;
+                unit++;
+            }
+
+            return $"{size:##,##0.##} {units[unit]}";
+
+        } /* FormatSizeWithUnit */
+
+        /*
+         * WriteName
+         * 
+         * Write the name of the file or directory with appropriate padding and color.
+         */
         static void WriteName(string path, int pad = 0)
         {
             WriteColored(Path.GetFileName(path).PadRight(pad), path);
         }
 
+        /*
+         * WriteColored
+         * 
+         * write the text to the console with color based on the type of file or directory.
+         */
         static void WriteColored(string text, string path)
         {
             if (Directory.Exists(path))
+            {
                 Console.Write("\x1b[34m"); // Blue
-            else if (path.EndsWith(".exe") || path.EndsWith(".bat") || path.EndsWith(".cmd"))
+            }
+            else if (path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                     path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
+                     path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+            {
                 Console.Write("\x1b[32m"); // Green
+            }
             else if (File.GetAttributes(path).HasFlag(FileAttributes.Hidden))
+            {
                 Console.Write("\x1b[2m");  // Dim
+            }
             else
+            {
                 Console.Write("\x1b[0m");  // Reset
+            }
 
-            Console.Write(text);
-            Console.Write("\x1b[0m");
-        }
+            Console.Write($"{text}\x1b[0m");
 
+        } /* WriteColored */
+
+        /*
+         * GetSizeColorGranular
+         * 
+         * get the ANSI color escape code based on the size of the file
+         */
+        static string GetSizeColorGranular(long size)
+        {
+            // ANSI 256-color escape codes for orange = 208
+            if (size >= 1L << 40) return "\x1b[91m";       // ≥ 1 TB → Bright Red
+            if (size >= 100L << 30) return "\x1b[31m";      // ≥ 100 GB → Red
+            if (size >= 10L << 30) return "\x1b[35m";      // ≥ 10 GB → Magenta
+            if (size >= 1L << 30) return "\x1b[38;5;208m"; // ≥ 1 GB → Orange
+            if (size >= 100L << 20) return "\x1b[32m";      // ≥ 100 MB → Green
+            if (size >= 10L << 20) return "\x1b[36m";      // ≥ 10 MB → Cyan
+            if (size >= 1L << 20) return "\x1b[34m";      // ≥ 1 MB → Blue
+            return "\x1b[2m";                               // < 1 MB → Dim
+        } /* GetSizeColorGranular */
+
+        /*
+         * EnableVirtualTerminal
+         * 
+         * Enable virtual terminal processing on Windows to allow ANSI escape codes for colors.
+         */
         static void EnableVirtualTerminal()
         {
             const int STD_OUTPUT_HANDLE = -11;
             var handle = GetStdHandle(STD_OUTPUT_HANDLE);
             GetConsoleMode(handle, out int mode);
-            SetConsoleMode(handle, mode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-        }
+            SetConsoleMode(handle, mode | 0x0004);
 
-        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-        private static extern IntPtr GetStdHandle(int nStdHandle);
+        } /* EnableVirtualTerminal */
 
-        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-        private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode);
-
-        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-        private static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
+        [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int nStdHandle);
+        [DllImport("kernel32.dll")] static extern bool GetConsoleMode(IntPtr hConsoleHandle, out int lpMode);
+        [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
     }
 }
 
