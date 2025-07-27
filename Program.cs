@@ -6,6 +6,7 @@
  *  Date        Author          Description
  *  ====        ======          ===========
  *  06-26-25    Craig           initial implementaton
+ *  07-27-25    Craig           fixed sorting to work with wildcards, and fixed redirected output to NOT have escape codes for colors
  *
  */
 using System;
@@ -26,10 +27,13 @@ namespace LS
         static bool sortByTime = false;
         static bool longFormat = false;
         static bool exactSize = false;
+        static bool isOutputRedirected;
 
         static void Main(string[] args)
         {
+            isOutputRedirected = Console.IsOutputRedirected;
             Console.OutputEncoding = System.Text.Encoding.UTF8;
+
             if (OperatingSystem.IsWindows()) EnableVirtualTerminal();
 
             /*
@@ -42,29 +46,37 @@ namespace LS
             if (finalTargets.Count == 0)
                 finalTargets.Add(Directory.GetCurrentDirectory());
 
+            var files = finalTargets.Where(f => File.Exists(f)).ToList();
+            var dirs = finalTargets.Where(d => Directory.Exists(d)).ToList();
+            var invalid = finalTargets.Except(files).Except(dirs).ToList();
+
             /*
-             * process each target
+             * Print sorted file entries (wildcard matches, etc)
              */
-            foreach (var target in finalTargets)
+            if (files.Count > 0)
             {
-                if (File.Exists(target))
-                {
-                    var entries = new List<string> { target };
-                    if (longFormat) PrintLongEntries(entries);
-                    else PrintEntries(entries);
-                    continue;
-                }
+                var sortedFiles = SortEntries(files);
+                if (longFormat) PrintLongEntries(sortedFiles);
+                else PrintEntries(sortedFiles);
+            }
 
-                if (!Directory.Exists(target))
-                {
-                    Console.Error.WriteLine($"ls: cannot access '{target}': No such file or directory");
-                    continue;
-                }
+            /*
+             * Print errors for bad paths
+             */
+            foreach (var missing in invalid)
+            {
+                Console.Error.WriteLine($"ls: cannot access '{missing}': No such file or directory");
+            }
 
+            /*
+             * Print directory listings
+             */
+            foreach (var dir in dirs)
+            {
                 if (finalTargets.Count > 1)
-                    Console.WriteLine($"\n{target}:");
+                    Console.WriteLine($"\n{dir}:");
 
-                ListEntries(target);
+                ListEntries(dir);
             }
         } /* Main() */
 
@@ -209,16 +221,32 @@ Options:
             {
                 ordered = entries.OrderByDescending(p =>
                 {
-                    try { return Directory.Exists(p) ? 0 : new FileInfo(p).Length; }
-                    catch { return -1; }
+                    try
+                    {
+                        if (File.Exists(p))
+                        {
+                            return new FileInfo(p).Length;
+                        }
+                        return 0L; // treat directories as 0
+                    }
+                    catch
+                    {
+                        return -1L;
+                    }
                 });
             }
             else if (sortByTime)
             {
                 ordered = entries.OrderByDescending(p =>
                 {
-                    try { return File.GetLastWriteTime(p); }
-                    catch { return DateTime.MinValue; }
+                    try
+                    {
+                        return Directory.Exists(p) ? Directory.GetLastWriteTime(p) : File.GetLastWriteTime(p);
+                    }
+                    catch
+                    {
+                        return DateTime.MinValue;
+                    }
                 });
             }
             else
@@ -229,6 +257,7 @@ Options:
             var list = ordered.ToList();
             if (reverseSort) list.Reverse();
             return list;
+
         } /* SortEntries */
 
         /*
@@ -244,7 +273,10 @@ Options:
             if (onePerLine)
             {
                 foreach (var path in entries)
+                {
                     WriteName(path);
+                    Console.WriteLine(); // ✅ force new line
+                }
             }
             else
             {
@@ -306,7 +338,10 @@ Options:
 
 
                 string sizeColor = GetSizeColorGranular(size);
-                Console.Write($"{perms}  {sizeColor}{sizeStr}\x1b[0m  {mod}  ");
+                if (!isOutputRedirected)
+                    Console.Write($"{perms}  {sizeColor}{sizeStr}\x1b[0m  {mod}  ");
+                else
+                    Console.Write($"{perms}  {sizeStr}  {mod}  ");
                 //Console.Write($"{perms}  {sizeStr}  {mod}  ");
                 WriteColored(name, entry);
                 Console.WriteLine();
@@ -350,26 +385,35 @@ Options:
          */
         static void WriteColored(string text, string path)
         {
-            if (Directory.Exists(path))
+            bool isOutputRedirected = Console.IsOutputRedirected;
+
+            string color = null;
+
+            if (!isOutputRedirected)
             {
-                Console.Write("\x1b[34m"); // Blue
-            }
-            else if (path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
-                     path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
-                     path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
-            {
-                Console.Write("\x1b[32m"); // Green
-            }
-            else if (File.GetAttributes(path).HasFlag(FileAttributes.Hidden))
-            {
-                Console.Write("\x1b[2m");  // Dim
-            }
-            else
-            {
-                Console.Write("\x1b[0m");  // Reset
+                if (Directory.Exists(path))
+                {
+                    color = "\x1b[34m"; // Blue
+                }
+                else if (path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                         path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
+                         path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase))
+                {
+                    color = "\x1b[32m"; // Green
+                }
+                else if (File.GetAttributes(path).HasFlag(FileAttributes.Hidden))
+                {
+                    color = "\x1b[2m";  // Dim
+                }
             }
 
-            Console.Write($"{text}\x1b[0m");
+            if (!string.IsNullOrEmpty(color))
+                Console.Write(color);
+
+            Console.Write(text);
+
+            if (!string.IsNullOrEmpty(color))
+                Console.Write("\x1b[0m"); // Reset
 
         } /* WriteColored */
 
