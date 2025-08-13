@@ -7,7 +7,7 @@
  *  ====        ======          ===========
  *  06-26-25    Craig           initial implementaton
  *  07-27-25    Craig           fixed sorting to work with wildcards, and fixed redirected output to NOT have escape codes for colors
- *
+ *  08-13-25    Craig           fixed wildcard matching to NOT fall back to current directory if no matches found
  */
 using System;
 using System.IO;
@@ -33,52 +33,86 @@ namespace LS
         {
             isOutputRedirected = Console.IsOutputRedirected;
             Console.OutputEncoding = System.Text.Encoding.UTF8;
-
             if (OperatingSystem.IsWindows()) EnableVirtualTerminal();
 
             /*
-             * Parse command line arguments and get the files to process.
+             * Parse args
              */
             var targets = new List<string>();
             ParseArgs(args, targets);
-            var finalTargets = ExpandWildcards(targets);
 
-            if (finalTargets.Count == 0)
-                finalTargets.Add(Directory.GetCurrentDirectory());
-
-            var files = finalTargets.Where(f => File.Exists(f)).ToList();
-            var dirs = finalTargets.Where(d => Directory.Exists(d)).ToList();
-            var invalid = finalTargets.Except(files).Except(dirs).ToList();
+            bool noArgsProvided = targets.Count == 0;
 
             /*
-             * Print sorted file entries (wildcard matches, etc)
+             * Expand wildcards, capture unmatched patterns as invalid
+             */
+            var invalid = new List<string>();
+            var finalTargets = ExpandWildcards(targets, invalid);
+
+            /*
+             * If user passed no args at all, default to current directory.
+             * If the user DID pass args but none were valid, do NOT fall back to CWD.
+             */
+            if (noArgsProvided && finalTargets.Count == 0)
+            {
+                finalTargets.Add(Directory.GetCurrentDirectory());
+            }
+
+            /* 
+             * Partition files and directories from finalTargets.
+             */
+            var files = finalTargets.Where(File.Exists).ToList();
+            var dirs = finalTargets.Where(Directory.Exists).ToList();
+
+            /*
+             * Any remaining strings in finalTargets that aren't files/dirs are invalid literals
+             */
+            foreach (var p in finalTargets)
+                if (!File.Exists(p) && !Directory.Exists(p))
+                {
+                    invalid.Add(p);
+                }
+
+            /*
+             * 1) Print sorted file entries (wildcard matches, etc)
              */
             if (files.Count > 0)
             {
                 var sortedFiles = SortEntries(files);
-                if (longFormat) PrintLongEntries(sortedFiles);
-                else PrintEntries(sortedFiles);
+                if (longFormat)
+                {
+                    PrintLongEntries(sortedFiles);
+                }
+                else
+                {
+                    PrintEntries(sortedFiles);
+                }
             }
 
-            /*
-             * Print errors for bad paths
-             */
-            foreach (var missing in invalid)
-            {
-                Console.Error.WriteLine($"ls: cannot access '{missing}': No such file or directory");
-            }
 
-            /*
-             * Print directory listings
+            /* 
+             * 2) Print directory listings
              */
             foreach (var dir in dirs)
             {
                 if (finalTargets.Count > 1)
+                {
                     Console.WriteLine($"\n{dir}:");
-
+                }
                 ListEntries(dir);
             }
+
+            /*
+             * 3) Print errors for bad paths (including unmatched wildcards)
+             * Match your existing error text.
+             */
+            foreach (var missing in invalid.Distinct())
+            {
+                Console.Error.WriteLine($"ls: cannot access '{missing}': No such file or directory");
+            }
+
         } /* Main() */
+
 
         /*
          * ParseArgs
@@ -124,26 +158,67 @@ namespace LS
          * Expand wildcards in the input list to actual file paths.
          * If a pattern contains '*' or '?', it will be expanded to match files in the current directory.
          */
-        static List<string> ExpandWildcards(List<string> inputs)
+        static List<string> ExpandWildcards(List<string> inputs, List<string> invalid)
         {
             var output = new List<string>();
+
             foreach (var pattern in inputs)
             {
-                if (pattern.Contains("*") || pattern.Contains("?"))
+                /*
+                 * Wildcard path?
+                 */
+                if (pattern.IndexOfAny(new[] { '*', '?' }) >= 0)
                 {
                     string dir = Path.GetDirectoryName(pattern);
                     if (string.IsNullOrEmpty(dir)) dir = Directory.GetCurrentDirectory();
                     string mask = Path.GetFileName(pattern);
-                    var matches = Directory.GetFileSystemEntries(dir, mask, SearchOption.TopDirectoryOnly);
-                    output.AddRange(matches);
+
+                    try
+                    {
+                        /*
+                         * If the directory part doesn't exist, treat as invalid right away.
+                         */
+                        if (!Directory.Exists(dir))
+                        {
+                            invalid.Add(pattern);
+                            continue;
+                        }
+
+                        var matches = Directory.GetFileSystemEntries(dir, mask, SearchOption.TopDirectoryOnly);
+                        if (matches.Length > 0)
+                        {
+                            output.AddRange(matches);
+                        }
+                        else
+                        {
+                            invalid.Add(pattern); // unmatched wildcard → error (do not fall back to CWD)
+                        }
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        /*
+                         * Behave like "cannot access": list as invalid
+                         */
+                        invalid.Add(pattern);
+                    }
+                    catch (IOException)
+                    {
+                        invalid.Add(pattern);
+                    }
                 }
                 else
                 {
+                    /*
+                     * Literal path: just carry it forward; existence is checked later
+                     */
                     output.Add(pattern);
                 }
             }
+
             return output;
+
         } /* ExpandWildcards */
+
 
         /*
          * ShowHelp
